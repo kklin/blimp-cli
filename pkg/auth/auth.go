@@ -16,6 +16,7 @@ import (
 
 type User struct {
 	ID        string `json:"sub"`
+	Email     string `json:"email"`
 	Namespace string
 }
 
@@ -58,6 +59,7 @@ func GetOAuthConfig(clientSecret string) oauth2.Config {
 		Endpoint:     Endpoint,
 		Scopes: []string{
 			"openid",
+			"email",
 		},
 	}
 }
