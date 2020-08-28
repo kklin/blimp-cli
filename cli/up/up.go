@@ -12,7 +12,6 @@ import (
 	"github.com/docker/cli/cli/config"
 	"github.com/docker/cli/cli/config/configfile"
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/client"
 	composeTypes "github.com/kelda/compose-go/types"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -26,8 +25,8 @@ import (
 	"github.com/kelda/blimp/cli/manager"
 	"github.com/kelda/blimp/cli/util"
 	"github.com/kelda/blimp/pkg/analytics"
+	"github.com/kelda/blimp/pkg/auth"
 	"github.com/kelda/blimp/pkg/cfgdir"
-	"github.com/kelda/blimp/pkg/docker"
 	"github.com/kelda/blimp/pkg/dockercompose"
 	"github.com/kelda/blimp/pkg/errors"
 	"github.com/kelda/blimp/pkg/proto/cluster"
@@ -62,14 +61,6 @@ func New() *cobra.Command {
 				log.WithError(err).Fatal("Failed to read blimp config")
 			}
 
-			dockerClient, err := util.GetDockerClient()
-			if err == nil {
-				cmd.dockerClient = dockerClient
-			} else {
-				log.WithError(err).Warn("Failed to connect to local Docker daemon. " +
-					"Building images won't work, but all other features will.")
-			}
-
 			// Convert the compose path to an absolute path so that the code
 			// that makes identifiers for bind volumes are unique for relative
 			// paths.
@@ -101,10 +92,14 @@ func New() *cobra.Command {
 	}
 	cobraCmd.Flags().StringSliceVarP(&composePaths, "file", "f", nil,
 		"Specify an alternate compose file\nDefaults to docker-compose.yml and docker-compose.yaml")
+	// TODO: Respect --build. Should disable looking at docker compose
+	// image cache, and using blimp remote registry cache.
 	cobraCmd.Flags().BoolVarP(&cmd.alwaysBuild, "build", "", false,
 		"Build images before starting containers")
 	cobraCmd.Flags().BoolVarP(&cmd.detach, "detach", "d", false,
 		"Leave containers running after blimp up exits")
+	cobraCmd.Flags().BoolVarP(&cmd.forceBuildkit, "remote-build", "", false,
+		"Force Docker images to be built in your sandbox instead of locally")
 	return cobraCmd
 }
 
@@ -115,13 +110,10 @@ type up struct {
 	overridePaths  []string
 	alwaysBuild    bool
 	detach         bool
-	dockerClient   *client.Client
+	forceBuildkit  bool
 	dockerConfig   *configfile.ConfigFile
-	regCreds       map[string]types.AuthConfig
+	regCreds       auth.RegistryCredentials
 	imageNamespace string
-
-	// The images in the image cache from previous Blimp runs.
-	cachedImages []types.ImageSummary
 
 	nodeControllerConn   *grpc.ClientConn
 	nodeControllerClient node.ControllerClient
@@ -161,9 +153,9 @@ func (cmd *up) run(services []string) error {
 	stClient := cmd.makeSyncthingClient(parsedCompose)
 	idPathMap := stClient.GetIDPathMap()
 
-	regCreds, err := docker.GetLocalRegistryCredentials(cmd.dockerConfig)
+	regCreds, err := auth.GetLocalRegistryCredentials(cmd.dockerConfig)
 	if err != nil {
-		log.WithError(err).Debug("Failed to get local registry credentials. Private images will fail to pull.")
+		log.WithError(err).Warn("Failed to get local registry credentials. Private images will fail to pull.")
 		regCreds = map[string]types.AuthConfig{}
 	}
 	cmd.regCreds = regCreds
@@ -174,13 +166,6 @@ func (cmd *up) run(services []string) error {
 		log.WithError(err).Fatal("Failed to create development sandbox")
 	}
 	defer cmd.nodeControllerConn.Close()
-
-	cachedImages, err := cmd.getCachedImages()
-	if err == nil {
-		cmd.cachedImages = cachedImages
-	} else {
-		log.WithError(err).Debug("Failed to get cached images")
-	}
 
 	builtImages, err := cmd.buildImages(parsedCompose)
 	if err != nil {
@@ -318,7 +303,7 @@ func (cmd *up) createSandbox(composeCfg string, idPathMap map[string]string) err
 		&cluster.CreateSandboxRequest{
 			Token:               cmd.auth.AuthToken,
 			ComposeFile:         composeCfg,
-			RegistryCredentials: registryCredentialsToProtobuf(cmd.regCreds),
+			RegistryCredentials: cmd.regCreds.ToProtobuf(),
 			SyncedFolders:       idPathMap,
 		})
 	if err != nil {
@@ -345,6 +330,11 @@ func (cmd *up) createSandbox(composeCfg string, idPathMap map[string]string) err
 	cmd.tunnelManager = tunnel.NewManager(cmd.nodeControllerClient, cmd.auth.AuthToken)
 
 	cmd.imageNamespace = resp.ImageNamespace
+	// Add the registry credentials for pushing to the blimp registry.
+	cmd.regCreds[strings.SplitN(cmd.imageNamespace, "/", 2)[0]] = types.AuthConfig{
+		Username: "ignored",
+		Password: cmd.auth.AuthToken,
+	}
 
 	// Save the Kubernetes API credentials for use by other Blimp commands.
 	kubeCreds := resp.GetKubeCredentials()
@@ -431,15 +421,4 @@ func (cmd *up) makeSyncthingClient(dcCfg composeTypes.Project) syncthing.Client 
 	}
 
 	return syncthing.NewClient(allVolumes)
-}
-
-func registryCredentialsToProtobuf(creds map[string]types.AuthConfig) map[string]*cluster.RegistryCredential {
-	pb := map[string]*cluster.RegistryCredential{}
-	for host, cred := range creds {
-		pb[host] = &cluster.RegistryCredential{
-			Username: cred.Username,
-			Password: cred.Password,
-		}
-	}
-	return pb
 }
