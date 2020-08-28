@@ -18,6 +18,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	composeTypes "github.com/kelda/compose-go/types"
+	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/frontend/dockerfile/instructions"
 	dockerfileParser "github.com/moby/buildkit/frontend/dockerfile/parser"
 	log "github.com/sirupsen/logrus"
@@ -28,6 +29,7 @@ import (
 	"github.com/kelda/blimp/cli/manager"
 	"github.com/kelda/blimp/cli/util"
 	"github.com/kelda/blimp/pkg/auth"
+	"github.com/kelda/blimp/pkg/buildkit"
 	"github.com/kelda/blimp/pkg/docker"
 	"github.com/kelda/blimp/pkg/errors"
 	"github.com/kelda/blimp/pkg/proto/cluster"
@@ -46,15 +48,43 @@ type image struct {
 // pushing, it first checks whether the image already exists remotely, and if
 // it does, short circuits the push.
 func (cmd *up) buildImages(composeFile composeTypes.Project) (map[string]string, error) {
-	if cmd.dockerClient == nil {
-		return nil, errors.New("no docker client")
-	}
-
 	var buildServices composeTypes.Services
 	for _, svc := range composeFile.Services {
 		if svc.Build != nil {
 			buildServices = append(buildServices, svc)
 		}
+	}
+
+	ap := &buildkit.AuthProvider{
+		Host:  strings.SplitN(cmd.imageNamespace, "/", 2)[0],
+		Token: cmd.auth.AuthToken,
+	}
+
+	if cmd.dockerClient == nil {
+		buildkitClient, err := client.New(context.TODO(), "tcp://localhost:1234")
+		if err != nil {
+			return nil, errors.WithContext("connect to buildkit", err)
+		}
+
+		builtImages := map[string]string{}
+		for _, svc := range buildServices {
+			imageName := fmt.Sprintf("%s/%s", cmd.imageNamespace, svc.Name)
+
+			digest, err := buildkit.Build(
+				buildkitClient,
+				svc.Name,
+				imageName,
+				filepath.Join(filepath.Dir(cmd.composePath), svc.Build.Context),
+				svc.Build.Dockerfile,
+				ap)
+			if err != nil {
+				return nil, err
+			}
+
+			builtImages[svc.Name] = fmt.Sprintf("%s@%s", imageName, digest)
+		}
+
+		return builtImages, nil
 	}
 
 	toPush := cmd.getServicesToPush(buildServices)
@@ -128,6 +158,7 @@ loop:
 
 	return svcToImageName, nil
 }
+
 
 func (cmd *up) getServicesToPush(services composeTypes.Services) (toPush composeTypes.Services) {
 	// We only need to check to see if cached images are pushed. If an image

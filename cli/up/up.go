@@ -39,6 +39,7 @@ func New() *cobra.Command {
 	var composePaths []string
 	var alwaysBuild bool
 	var detach bool
+	var useBuildkit bool
 	cobraCmd := &cobra.Command{
 		Use:   "up [options] [SERVICE...]",
 		Short: "Create and start containers",
@@ -69,12 +70,11 @@ func New() *cobra.Command {
 				detach:       detach,
 			}
 
-			dockerClient, err := util.GetDockerClient()
-			if err == nil {
-				cmd.dockerClient = dockerClient
-			} else {
-				log.WithError(err).Warn("Failed to connect to local Docker daemon. " +
-					"Building images won't work, but all other features will.")
+			if !useBuildkit {
+				dockerClient, err := util.GetDockerClient()
+				if err == nil {
+					cmd.dockerClient = dockerClient
+				}
 			}
 
 			// Convert the compose path to an absolute path so that the code
@@ -111,6 +111,8 @@ func New() *cobra.Command {
 		"Build images before starting containers")
 	cobraCmd.Flags().BoolVarP(&detach, "detach", "d", false,
 		"Leave containers running after blimp up exits")
+	cobraCmd.Flags().BoolVarP(&useBuildkit, "remote-build", "", false,
+		"Force Docker images to be built in your sandbox instead of locally")
 	return cobraCmd
 }
 
