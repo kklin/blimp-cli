@@ -10,6 +10,7 @@ import (
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/util/progress/progressui"
 
+	"github.com/kelda/blimp/pkg/auth"
 	"github.com/kelda/blimp/pkg/build"
 	"github.com/kelda/blimp/pkg/errors"
 	"github.com/kelda/blimp/pkg/tunnel"
@@ -17,10 +18,10 @@ import (
 
 type Client struct {
 	client       *client.Client
-	authProvider *AuthProvider
+	authProvider *authProvider
 }
 
-func New(tunnelManager tunnel.Manager, registryHost, token string) (build.Interface, error) {
+func New(tunnelManager tunnel.Manager, regCreds auth.RegistryCredentials) (build.Interface, error) {
 	tunnelErr := make(chan error)
 	tunnelReady := make(chan struct{})
 	go func() {
@@ -38,11 +39,8 @@ func New(tunnelManager tunnel.Manager, registryHost, token string) (build.Interf
 	}
 
 	return Client{
-		client: c,
-		authProvider: &AuthProvider{
-			Host:  registryHost,
-			Token: token,
-		},
+		client:       c,
+		authProvider: &authProvider{regCreds: regCreds},
 	}, nil
 }
 

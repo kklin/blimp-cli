@@ -8,8 +8,10 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
-	"github.com/kelda/blimp/cli/util"
-	"github.com/kelda/blimp/pkg/docker"
+	"github.com/kelda/blimp/pkg/auth"
+	"github.com/kelda/blimp/pkg/build"
+	"github.com/kelda/blimp/pkg/build/buildkit"
+	"github.com/kelda/blimp/pkg/build/docker"
 	"github.com/kelda/blimp/pkg/dockercompose"
 )
 
@@ -24,21 +26,21 @@ func New() *cobra.Command {
 			"If you change a service's `Dockerfile` or the contents of its build directory, " +
 			"you can run `blimp build` to rebuild it.",
 		Run: func(_ *cobra.Command, services []string) {
-			dockerClient, err := util.GetDockerClient()
-			if err != nil {
-				log.WithError(err).Fatal("Failed to connect to local Docker daemon, " +
-					"which is used for building images. Aborting")
-			}
-
 			dockerConfig, err := config.Load(config.Dir())
 			if err != nil {
 				log.WithError(err).Fatal("Failed to load docker config")
 			}
 
-			regCreds, err := docker.GetLocalRegistryCredentials(dockerConfig)
+			regCreds, err := auth.GetLocalRegistryCredentials(cmd.dockerConfig)
 			if err != nil {
-				log.WithError(err).Warn("Failed to get local registry credentials. Private images will fail to pull.")
+				log.WithError(err).Debug("Failed to get local registry credentials. Private images will fail to pull.")
 				regCreds = map[string]types.AuthConfig{}
+			}
+			// Add the registry credentials for pushing to the blimp registry.
+			// TODO: Cleanest thing is probably to add an RPC for getting the image namespace.
+			regCreds[strings.SplitN(cmd.imageNamespace, "/", 2)[0]] = types.AuthConfig{
+				Username: "ignored",
+				Password: cmd.auth.AuthToken,
 			}
 
 			// Convert the compose path to an absolute path so that the code
@@ -71,15 +73,13 @@ func New() *cobra.Command {
 					continue
 				}
 
-				// TODO: Need to store imageNamespace. Or just always make the
-				// call to the manager createsandbox.
-				imageName := fmt.Sprintf("%s/%s", cmd.imageNamespace, svc.Name)
 				log.Infof("Building %s\n", svc.Name)
 				opts := build.Options{
 					BuildConfig: *svc.Build,
 					PullParent:  pull,
 					NoCache:     noCache,
 				}
+				imageName := fmt.Sprintf("%s/%s", cmd.imageNamespace, svc.Name)
 				_, err := builder.BuildAndPush(svc.Name, imageName, opts)
 				if err != nil {
 					log.WithError(err).WithField("service", svc.Name).Warn("Failed to build service")
@@ -98,19 +98,17 @@ func New() *cobra.Command {
 
 func (cmd *up) getImageBuilder() (build.Interface, error) {
 	if !cmd.forceBuildkit {
-		// TODO: Any other callers to GetDockerClient?
-		dockerClient, err := util.GetDockerClient()
+		dockerClient, err := docker.New(dockerClient, regCreds, dockerConfig, docker.CacheOptions{Disable: true})
 		if err == nil {
-			// TODO: docker.New could parse dockerConfig and regCreds itself.
-			return docker.New(dockerClient, cmd.regCreds, cmd.dockerConfig, cmd.auth.AuthToken, cmd.composePath), nil
+			return dockerClient, nil
 		}
 		// TODO: Handle err != nil, return it if both fail.
 	}
 
 	// TODO: Create tunnelManager.
-	// TODO: Test booting without existing namespace.
+	// TODO: Test building without existing namespace.
 
-	buildkitClient, err := buildkit.New(cmd.tunnelManager, strings.SplitN(cmd.imageNamespace, "/", 2)[0], cmd.auth.AuthToken)
+	buildkitClient, err := buildkit.New(tunnelManager, regCreds)
 	if err != nil {
 		return nil, errors.WithContext("create buildkit image builder", err)
 	}

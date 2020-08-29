@@ -25,7 +25,7 @@ import (
 	"github.com/kelda/blimp/cli/manager"
 	"github.com/kelda/blimp/cli/util"
 	"github.com/kelda/blimp/pkg/analytics"
-	"github.com/kelda/blimp/pkg/build/docker"
+	"github.com/kelda/blimp/pkg/auth"
 	"github.com/kelda/blimp/pkg/cfgdir"
 	"github.com/kelda/blimp/pkg/dockercompose"
 	"github.com/kelda/blimp/pkg/errors"
@@ -152,10 +152,15 @@ func (cmd *up) run(services []string) error {
 	idPathMap := stClient.GetIDPathMap()
 
 	// TODO: Is this the right package for this func?
-	regCreds, err := docker.GetLocalRegistryCredentials(cmd.dockerConfig)
+	regCreds, err := auth.GetLocalRegistryCredentials(cmd.dockerConfig)
 	if err != nil {
 		log.WithError(err).Debug("Failed to get local registry credentials. Private images will fail to pull.")
 		regCreds = map[string]types.AuthConfig{}
+	}
+	// Add the registry credentials for pushing to the blimp registry.
+	regCreds[strings.SplitN(cmd.imageNamespace, "/", 2)[0]] = types.AuthConfig{
+		Username: "ignored",
+		Password: cmd.auth.AuthToken,
 	}
 	cmd.regCreds = regCreds
 

@@ -7,9 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -18,42 +18,50 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	docker "github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/jsonmessage"
-	"github.com/kelda/blimp/pkg/auth"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh/terminal"
 
+	"github.com/kelda/blimp/pkg/auth"
 	"github.com/kelda/blimp/pkg/build"
 	"github.com/kelda/blimp/pkg/errors"
 )
 
 type client struct {
 	client   *docker.Client
-	regCreds map[string]types.AuthConfig
+	regCreds auth.RegistryCredentials
 	// TODO not pointer?
 	dockerConfig *configfile.ConfigFile
-	// TODO: Rename to blimp token or something.
-	token string
 
-	composeImageCache        []types.ImageSummary
-	disableComposeImageCache bool
+	composeImageCache []types.ImageSummary
 }
 
-func New(dockerClient *docker.Client, regCreds map[string]types.AuthConfig, dockerConfig *configfile.ConfigFile, token, absComposePath string) build.Interface {
+type CacheOptions struct {
+	Disable     bool
+	ProjectName string
+}
+
+func New(regCreds auth.RegistryCredentials, dockerConfig *configfile.ConfigFile, cacheOpts CacheOptions) (build.Interface, error) {
+	dockerClient, err := getDockerClient()
+	if err != nil {
+		return nil, err
+	}
+
 	c := client{
 		client:       dockerClient,
 		regCreds:     regCreds,
 		dockerConfig: dockerConfig,
-		token:        token,
 	}
 
-	composeImageCache, err := getComposeImageCache(dockerClient, absComposePath)
-	if err == nil {
-		c.composeImageCache = composeImageCache
-	} else {
-		log.WithError(err).Debug("Failed to get compose image cache")
+	if !cacheOpts.Disable {
+		composeImageCache, err := getComposeImageCache(dockerClient, cacheOpts.ProjectName)
+		if err == nil {
+			c.composeImageCache = composeImageCache
+		} else {
+			log.WithError(err).Debug("Failed to get compose image cache")
+		}
 	}
 
-	return c
+	return c, nil
 }
 
 func (c client) BuildAndPush(serviceName, imageName string, opts build.Options) (digest string, err error) {
@@ -116,9 +124,14 @@ func (c client) BuildAndPush(serviceName, imageName string, opts build.Options) 
 }
 
 func (c *client) push(image string) error {
-	registryAuth, err := auth.RegistryAuthHeader(c.token)
+	cred, ok := c.regCreds.LookupByImage(image)
+	if !ok {
+		return errors.New("no credentials for pushing image")
+	}
+
+	registryAuth, err := auth.RegistryAuthHeader(cred)
 	if err != nil {
-		return errors.WithContext("make registry auth header", err)
+		return err
 	}
 
 	pushResp, err := c.client.ImagePush(context.Background(), image, types.ImagePushOptions{
@@ -131,6 +144,51 @@ func (c *client) push(image string) error {
 
 	isTerminal := terminal.IsTerminal(int(os.Stderr.Fd()))
 	return jsonmessage.DisplayJSONMessagesStream(pushResp, os.Stderr, os.Stderr.Fd(), isTerminal, nil)
+}
+
+// getDockerClient returns a working Docker client, or nil if we can't connect
+// to a Docker client.
+func getDockerClient() (*docker.Client, error) {
+	dockerClient, err := docker.NewClientWithOpts(docker.FromEnv, docker.WithAPIVersionNegotiation())
+	if err != nil {
+		return nil, errors.WithContext("create docker client", err)
+	}
+
+	ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
+	_, err = dockerClient.Ping(ctx)
+	if err == nil {
+		// We successfully connected to the Docker daemon, so we're pretty
+		// confident it's running and works.
+		return dockerClient, nil
+	}
+	if !docker.IsErrConnectionFailed(err) {
+		return nil, errors.WithContext("docker ping failed", err)
+	}
+
+	// If connection failed, Docker is probably not available at the default
+	// address.
+
+	// If a custom host is set, don't try any funny business.
+	if dockerClient.DaemonHost() != docker.DefaultDockerHost {
+		return nil, errors.WithContext("docker ping failed", err)
+	}
+
+	// If we're in WSL, see if we should use the TCP socket instead.
+	procVersion, err := ioutil.ReadFile("/proc/version")
+	if err != nil || !strings.Contains(string(procVersion), "Microsoft") {
+		// Not WSL, so we just give up.
+		return nil, errors.WithContext("docker ping failed", err)
+	}
+
+	dockerClient, err = docker.NewClientWithOpts(docker.FromEnv, docker.WithAPIVersionNegotiation(),
+		docker.WithHost("tcp://localhost:2375"))
+	if err != nil {
+		return nil, errors.WithContext("create WSL TCP docker client", err)
+	}
+
+	ctx, _ = context.WithTimeout(context.Background(), 5*time.Second)
+	_, err = dockerClient.Ping(ctx)
+	return dockerClient, err
 }
 
 func getHeader(fi os.FileInfo, path string) (*tar.Header, error) {
@@ -194,19 +252,14 @@ func makeTar(dir string) (io.Reader, error) {
 	return &out, err
 }
 
-func getComposeImageCache(c *docker.Client, absComposePath string) ([]types.ImageSummary, error) {
+func getComposeImageCache(c *docker.Client, project string) ([]types.ImageSummary, error) {
 	// See https://github.com/docker/compose/blob/854c14a5bcf566792ee8a972325c37590521656b/compose/service.py#L379
-	// and https://github.com/docker/compose/blob/854c14a5bcf566792ee8a972325c37590521656b/compose/cli/command.py#L176.
-	project := filepath.Base(filepath.Dir(absComposePath))
-	badChar := regexp.MustCompile(`[^-_a-z0-9]`)
-	composeImagePrefix := badChar.ReplaceAllString(strings.ToLower(project), "")
-
 	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
 	opts := types.ImageListOptions{
 		Filters: filters.NewArgs(filters.KeyValuePair{
 			Key: "reference",
 			// This will match images built by Docker Compose.
-			Value: fmt.Sprintf("%s_*:latest", composeImagePrefix),
+			Value: fmt.Sprintf("%s_*:latest", project),
 		}),
 	}
 	return c.ImageList(ctx, opts)

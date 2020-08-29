@@ -209,6 +209,7 @@ func Load(composePath string, overridePaths, services []string) (types.Project, 
 		cfgPtr.Services = filtered
 	}
 
+	cfgPtr.Name = getProjectName(composePath)
 	return *cfgPtr, nil
 }
 
@@ -330,6 +331,13 @@ func load(det types.ConfigDetails, opts ...func(opts *loader.Options)) (cfg *typ
 
 	cfg, err = loader.Load(det, opts...)
 	return
+}
+
+func getProjectName(absComposePath string) string {
+	// See https://github.com/docker/compose/blob/854c14a5bcf566792ee8a972325c37590521656b/compose/cli/command.py#L176.
+	project := filepath.Base(filepath.Dir(absComposePath))
+	badChar := regexp.MustCompile(`[^-_a-z0-9]`)
+	return badChar.ReplaceAllString(strings.ToLower(project), "")
 }
 
 func ParseNamedBindVolume(vol types.VolumeConfig) (source string, ok bool) {

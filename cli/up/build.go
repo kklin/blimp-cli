@@ -2,12 +2,10 @@ package up
 
 import (
 	"fmt"
-	"strings"
 
 	composeTypes "github.com/kelda/compose-go/types"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/kelda/blimp/cli/util"
 	"github.com/kelda/blimp/pkg/build"
 	"github.com/kelda/blimp/pkg/build/buildkit"
 	"github.com/kelda/blimp/pkg/build/docker"
@@ -22,7 +20,7 @@ func (cmd *up) buildImages(composeFile composeTypes.Project) (map[string]string,
 		}
 	}
 
-	builder, err := cmd.getImageBuilder()
+	builder, err := cmd.getImageBuilder(composeFile.Name)
 	if err != nil {
 		return nil, errors.WithContext("get image builder", err)
 	}
@@ -43,18 +41,16 @@ func (cmd *up) buildImages(composeFile composeTypes.Project) (map[string]string,
 	return builtImages, nil
 }
 
-func (cmd *up) getImageBuilder() (build.Interface, error) {
+func (cmd *up) getImageBuilder(projectName string) (build.Interface, error) {
 	if !cmd.forceBuildkit {
-		// TODO: Any other callers to GetDockerClient?
-		dockerClient, err := util.GetDockerClient()
+		dockerClient, err := docker.New(cmd.regCreds, cmd.dockerConfig, docker.CacheOptions{ProjectName: projectName})
 		if err == nil {
-			// TODO: docker.New could parse dockerConfig and regCreds itself.
-			return docker.New(dockerClient, cmd.regCreds, cmd.dockerConfig, cmd.auth.AuthToken, cmd.composePath), nil
+			return dockerClient, nil
 		}
 		// TODO: Handle err != nil, return it if both fail.
 	}
 
-	buildkitClient, err := buildkit.New(cmd.tunnelManager, strings.SplitN(cmd.imageNamespace, "/", 2)[0], cmd.auth.AuthToken)
+	buildkitClient, err := buildkit.New(cmd.tunnelManager, cmd.regCreds)
 	if err != nil {
 		return nil, errors.WithContext("create buildkit image builder", err)
 	}
