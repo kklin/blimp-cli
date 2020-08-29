@@ -10,12 +10,31 @@ import (
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/util/progress/progressui"
 
+	"github.com/kelda/blimp/pkg/build"
 	"github.com/kelda/blimp/pkg/errors"
 )
 
-func Build(buildkitClient *client.Client, name, imageName, contextDir, dockerfile string,
-	authProvider *AuthProvider) (digest string, err error) {
+type Client struct {
+	client       *client.Client
+	authProvider *AuthProvider
+}
 
+func New(buildkitHost, registryHost, token string) (build.Interface, error) {
+	c, err := client.New(context.Background(), buildkitHost)
+	if err != nil {
+		return nil, errors.WithContext("connect to buildkit", err)
+	}
+
+	return Client{
+		client: c,
+		authProvider: &AuthProvider{
+			Host:  registryHost,
+			Token: token,
+		},
+	}, nil
+}
+
+func (c Client) BuildAndPush(serviceName, imageName string, opts build.Options) (digest string, err error) {
 	exportEntry := client.ExportEntry{
 		Type:  client.ExporterImage,
 		Attrs: map[string]string{},
@@ -27,29 +46,29 @@ func Build(buildkitClient *client.Client, name, imageName, contextDir, dockerfil
 	solveOpt := client.SolveOpt{
 		Frontend: "dockerfile.v0",
 		FrontendAttrs: map[string]string{
-			"filename": dockerfile,
+			"filename": opts.Dockerfile,
 		},
 		LocalDirs: map[string]string{
-			"context":    contextDir,
+			"context":    opts.Context,
 			"dockerfile": ".",
 		},
 		Exports: []client.ExportEntry{
 			exportEntry,
 		},
 		Session: []session.Attachable{
-			authProvider,
+			c.authProvider,
 		},
 	}
 
 	ch := make(chan *client.SolveStatus)
-	c, err := console.ConsoleFromFile(os.Stdout)
+	cons, err := console.ConsoleFromFile(os.Stdout)
 	if err != nil {
 		return "", errors.WithContext("create buildkit console", err)
 	}
 
-	go progressui.DisplaySolveStatus(context.TODO(), fmt.Sprintf("Building %s", name), c, os.Stdout, ch)
+	go progressui.DisplaySolveStatus(context.TODO(), fmt.Sprintf("Building %s", serviceName), cons, os.Stdout, ch)
 
-	resp, err := buildkitClient.Solve(context.TODO(), nil, solveOpt, ch)
+	resp, err := c.client.Solve(context.TODO(), nil, solveOpt, ch)
 	if err != nil {
 		return "", errors.WithContext("buildkit solve", err)
 	}

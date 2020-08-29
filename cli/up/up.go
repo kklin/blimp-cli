@@ -12,11 +12,11 @@ import (
 	"github.com/docker/cli/cli/config"
 	"github.com/docker/cli/cli/config/configfile"
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/client"
 	composeTypes "github.com/kelda/compose-go/types"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/kelda/blimp/cli/authstore"
@@ -25,8 +25,8 @@ import (
 	"github.com/kelda/blimp/cli/manager"
 	"github.com/kelda/blimp/cli/util"
 	"github.com/kelda/blimp/pkg/analytics"
+	"github.com/kelda/blimp/pkg/build/docker"
 	"github.com/kelda/blimp/pkg/cfgdir"
-	"github.com/kelda/blimp/pkg/docker"
 	"github.com/kelda/blimp/pkg/dockercompose"
 	"github.com/kelda/blimp/pkg/errors"
 	"github.com/kelda/blimp/pkg/proto/cluster"
@@ -37,9 +37,7 @@ import (
 
 func New() *cobra.Command {
 	var composePaths []string
-	var alwaysBuild bool
-	var detach bool
-	var useBuildkit bool
+	var cmd up
 	cobraCmd := &cobra.Command{
 		Use:   "up [options] [SERVICE...]",
 		Short: "Create and start containers",
@@ -63,20 +61,6 @@ func New() *cobra.Command {
 				log.WithError(err).Fatal("Failed to read blimp config")
 			}
 
-			cmd := up{
-				auth:         auth,
-				globalConfig: globalConfig,
-				alwaysBuild:  alwaysBuild,
-				detach:       detach,
-			}
-
-			if !useBuildkit {
-				dockerClient, err := util.GetDockerClient()
-				if err == nil {
-					cmd.dockerClient = dockerClient
-				}
-			}
-
 			// Convert the compose path to an absolute path so that the code
 			// that makes identifiers for bind volumes are unique for relative
 			// paths.
@@ -91,15 +75,16 @@ func New() *cobra.Command {
 				log.WithError(err).Fatal("Failed to get absolute path to Compose file")
 			}
 
-			cmd.composePath = composePath
-			cmd.overridePaths = overridePaths
-			//import the docker config
-			cfg, err := config.Load(config.Dir())
+			dockerConfig, err := config.Load(config.Dir())
 			if err != nil {
 				log.WithError(err).Fatal("Failed to load docker config")
 			}
 
-			cmd.dockerConfig = cfg
+			cmd.composePath = composePath
+			cmd.overridePaths = overridePaths
+			cmd.dockerConfig = dockerConfig
+			cmd.auth = auth
+			cmd.globalConfig = globalConfig
 			if err := cmd.run(services); err != nil {
 				errors.HandleFatalError(err)
 			}
@@ -107,11 +92,11 @@ func New() *cobra.Command {
 	}
 	cobraCmd.Flags().StringSliceVarP(&composePaths, "file", "f", nil,
 		"Specify an alternate compose file\nDefaults to docker-compose.yml and docker-compose.yaml")
-	cobraCmd.Flags().BoolVarP(&alwaysBuild, "build", "", false,
+	cobraCmd.Flags().BoolVarP(&cmd.alwaysBuild, "build", "", false,
 		"Build images before starting containers")
-	cobraCmd.Flags().BoolVarP(&detach, "detach", "d", false,
+	cobraCmd.Flags().BoolVarP(&cmd.detach, "detach", "d", false,
 		"Leave containers running after blimp up exits")
-	cobraCmd.Flags().BoolVarP(&useBuildkit, "remote-build", "", false,
+	cobraCmd.Flags().BoolVarP(&cmd.forceBuildkit, "remote-build", "", false,
 		"Force Docker images to be built in your sandbox instead of locally")
 	return cobraCmd
 }
@@ -123,15 +108,14 @@ type up struct {
 	overridePaths  []string
 	alwaysBuild    bool
 	detach         bool
-	dockerClient   *client.Client
+	forceBuildkit  bool
 	dockerConfig   *configfile.ConfigFile
 	regCreds       map[string]types.AuthConfig
 	imageNamespace string
-	nodeAddr       string
-	nodeCert       string
 
-	// The images in the image cache from previous Blimp runs.
-	cachedImages []types.ImageSummary
+	nodeControllerConn   *grpc.ClientConn
+	nodeControllerClient node.ControllerClient
+	tunnelManager        tunnel.Manager
 }
 
 func (cmd *up) run(services []string) error {
@@ -167,6 +151,7 @@ func (cmd *up) run(services []string) error {
 	stClient := cmd.makeSyncthingClient(parsedCompose)
 	idPathMap := stClient.GetIDPathMap()
 
+	// TODO: Is this the right package for this func?
 	regCreds, err := docker.GetLocalRegistryCredentials(cmd.dockerConfig)
 	if err != nil {
 		log.WithError(err).Debug("Failed to get local registry credentials. Private images will fail to pull.")
@@ -179,13 +164,7 @@ func (cmd *up) run(services []string) error {
 	if err := cmd.createSandbox(string(parsedComposeBytes), idPathMap); err != nil {
 		log.WithError(err).Fatal("Failed to create development sandbox")
 	}
-
-	cachedImages, err := cmd.getCachedImages()
-	if err == nil {
-		cmd.cachedImages = cachedImages
-	} else {
-		log.WithError(err).Debug("Failed to get cached images")
-	}
+	defer cmd.nodeControllerConn.Close()
 
 	builtImages, err := cmd.buildImages(parsedCompose)
 	if err != nil {
@@ -206,14 +185,6 @@ func (cmd *up) run(services []string) error {
 		return err
 	}
 
-	nodeConn, err := util.Dial(cmd.nodeAddr, cmd.nodeCert, "")
-	if err != nil {
-		return err
-	}
-	defer nodeConn.Close()
-	nodeController := node.NewControllerClient(nodeConn)
-	tunnelManager := tunnel.NewManager(nodeController, cmd.auth.AuthToken)
-
 	syncthingError := make(chan error, 1)
 	syncthingCtx, cancelSyncthing := context.WithCancel(context.Background())
 	defer cancelSyncthing()
@@ -221,7 +192,7 @@ func (cmd *up) run(services []string) error {
 		go func() {
 			defer close(syncthingError)
 
-			output, err := stClient.Run(syncthingCtx, nodeController, cmd.auth.AuthToken, tunnelManager)
+			output, err := stClient.Run(syncthingCtx, cmd.nodeControllerClient, cmd.auth.AuthToken, cmd.tunnelManager)
 			select {
 			// We intentionally killed the Syncthing process, so exiting was expected.
 			case <-syncthingCtx.Done():
@@ -246,7 +217,7 @@ func (cmd *up) run(services []string) error {
 			mapping := mapping
 			if mapping.Protocol == "tcp" {
 				tunnelsErrGroup.Go(func() error {
-					return tunnelManager.Run(mapping.HostIP, mapping.Published, svc.Name, mapping.Target)
+					return cmd.tunnelManager.Run(mapping.HostIP, mapping.Published, svc.Name, mapping.Target, nil)
 				})
 			}
 		}
@@ -346,9 +317,14 @@ func (cmd *up) createSandbox(composeCfg string, idPathMap map[string]string) err
 		os.Exit(1)
 	}
 
+	cmd.nodeControllerConn, err = util.Dial(resp.NodeAddress, resp.NodeCert, "")
+	if err != nil {
+		return errors.WithContext("connect to node controller", err)
+	}
+	cmd.nodeControllerClient = node.NewControllerClient(cmd.nodeControllerConn)
+	cmd.tunnelManager = tunnel.NewManager(cmd.nodeControllerClient, cmd.auth.AuthToken)
+
 	cmd.imageNamespace = resp.ImageNamespace
-	cmd.nodeAddr = resp.NodeAddress
-	cmd.nodeCert = resp.NodeCert
 
 	// Save the Kubernetes API credentials for use by other Blimp commands.
 	kubeCreds := resp.GetKubeCredentials()
