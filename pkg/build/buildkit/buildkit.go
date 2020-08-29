@@ -59,7 +59,9 @@ func (c Client) BuildAndPush(serviceName, imageName string, opts build.Options) 
 			"filename": opts.Dockerfile,
 		},
 		LocalDirs: map[string]string{
-			"context":    opts.Context,
+			"context": opts.Context,
+			// TODO: Fails to find dockerfile if running with -f in a different
+			// directory.
 			"dockerfile": ".",
 		},
 		Exports: []client.ExportEntry{

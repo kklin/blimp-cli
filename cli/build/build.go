@@ -138,8 +138,11 @@ func getImageBuilder(regCreds auth.RegistryCredentials, dockerConfig *configfile
 	}
 
 	// TODO: Say that we're spinning up buildkit.
+	pp := util.NewProgressPrinter(os.Stdout, "Booting remote Docker image builder")
+	go pp.Run()
 	ctx, _ := context.WithTimeout(context.Background(), 3*time.Minute)
 	buildkitConn, err := manager.C.GetBuildkit(ctx, &cluster.GetBuildkitRequest{Token: authToken})
+	pp.Stop()
 	if err != nil {
 		return nil, errors.WithContext("boot buildkit", err)
 	}

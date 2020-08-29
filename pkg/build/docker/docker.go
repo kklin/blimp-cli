@@ -90,7 +90,6 @@ func (c client) BuildAndPush(serviceName, imageName string, opts build.Options) 
 		log.WithField("service", serviceName).WithError(err).Debug("Prepush failed. Proceeding with a full image push")
 	}
 
-	//imageName = "dev-kevin-blimp-registry.kelda.io/a98c0197112b7a4a96b72ea21ac0802b/web:60a7cc81c039c034c19acff5e793735889c289d9f46030ab9776d6cc6c63b977"
 	if digest, err = c.push(imageName); err != nil {
 		return "", errors.WithContext("push image", err)
 	}
@@ -293,11 +292,12 @@ func getComposeImageCache(c *docker.Client, project string) (map[string]types.Im
 	cache := map[string]types.ImageSummary{}
 	for _, image := range images {
 		for _, tag := range image.RepoTags {
-			println(tag)
-			if !strings.HasSuffix(tag, ":latest") || !strings.HasPrefix(tag, project+"_") {
+			prefix := project + "_"
+			suffix := ":latest"
+			if !strings.HasPrefix(tag, prefix) || !strings.HasSuffix(tag, suffix) {
 				continue
 			}
-			cache[strings.TrimPrefix(tag, project+"_")] = image
+			cache[strings.TrimPrefix(strings.TrimSuffix(tag, suffix), prefix)] = image
 		}
 	}
 	return cache, nil

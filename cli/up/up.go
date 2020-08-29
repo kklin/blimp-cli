@@ -92,6 +92,8 @@ func New() *cobra.Command {
 	}
 	cobraCmd.Flags().StringSliceVarP(&composePaths, "file", "f", nil,
 		"Specify an alternate compose file\nDefaults to docker-compose.yml and docker-compose.yaml")
+	// TODO: Respect --build. Should disable looking at docker compose
+	// image cache, and using blimp remote registry cache.
 	cobraCmd.Flags().BoolVarP(&cmd.alwaysBuild, "build", "", false,
 		"Build images before starting containers")
 	cobraCmd.Flags().BoolVarP(&cmd.detach, "detach", "d", false,
@@ -155,11 +157,6 @@ func (cmd *up) run(services []string) error {
 	if err != nil {
 		log.WithError(err).Debug("Failed to get local registry credentials. Private images will fail to pull.")
 		regCreds = map[string]types.AuthConfig{}
-	}
-	// Add the registry credentials for pushing to the blimp registry.
-	regCreds[strings.SplitN(cmd.imageNamespace, "/", 2)[0]] = types.AuthConfig{
-		Username: "ignored",
-		Password: cmd.auth.AuthToken,
 	}
 	cmd.regCreds = regCreds
 
@@ -329,6 +326,11 @@ func (cmd *up) createSandbox(composeCfg string, idPathMap map[string]string) err
 	cmd.tunnelManager = tunnel.NewManager(cmd.nodeControllerClient, cmd.auth.AuthToken)
 
 	cmd.imageNamespace = resp.ImageNamespace
+	// Add the registry credentials for pushing to the blimp registry.
+	cmd.regCreds[strings.SplitN(cmd.imageNamespace, "/", 2)[0]] = types.AuthConfig{
+		Username: "ignored",
+		Password: cmd.auth.AuthToken,
+	}
 
 	// Save the Kubernetes API credentials for use by other Blimp commands.
 	kubeCreds := resp.GetKubeCredentials()
