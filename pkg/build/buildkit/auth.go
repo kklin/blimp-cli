@@ -17,7 +17,7 @@ func (ap *AuthProvider) Register(server *grpc.Server) {
 }
 
 func (ap *AuthProvider) Credentials(_ context.Context, req *auth.CredentialsRequest) (*auth.CredentialsResponse, error) {
-	if (req.Host != ap.Host) {
+	if req.Host != ap.Host {
 		return &auth.CredentialsResponse{}, nil
 	}
 	return &auth.CredentialsResponse{
