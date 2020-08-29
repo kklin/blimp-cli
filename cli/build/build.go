@@ -1,9 +1,11 @@
 package build
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/docker/cli/cli/config"
 	"github.com/docker/cli/cli/config/configfile"
@@ -12,12 +14,16 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kelda/blimp/cli/authstore"
+	"github.com/kelda/blimp/cli/manager"
+	"github.com/kelda/blimp/cli/util"
 	"github.com/kelda/blimp/pkg/auth"
 	"github.com/kelda/blimp/pkg/build"
 	"github.com/kelda/blimp/pkg/build/buildkit"
 	"github.com/kelda/blimp/pkg/build/docker"
 	"github.com/kelda/blimp/pkg/dockercompose"
 	"github.com/kelda/blimp/pkg/errors"
+	"github.com/kelda/blimp/pkg/proto/cluster"
+	"github.com/kelda/blimp/pkg/proto/node"
 	"github.com/kelda/blimp/pkg/tunnel"
 )
 
@@ -48,8 +54,12 @@ func New() *cobra.Command {
 				log.WithError(err).Fatal("Failed to load docker config")
 			}
 
-			// TODO: Cleanest thing is probably to add an RPC for getting the image namespace.
-			imageNamespace := "dev-kevin-blimp-registry.kelda.io/a98c0197112b7a4a96b72ea21ac0802b"
+			getNamespaceCtx, _ := context.WithTimeout(context.Background(), 30*time.Second)
+			getImageNamespaceResp, err := manager.C.GetImageNamespace(getNamespaceCtx, &cluster.GetImageNamespaceRequest{Token: authConfig.AuthToken})
+			if err != nil {
+				log.WithError(err).Fatal("Failed to get development environment's image namespace")
+			}
+			imageNamespace := getImageNamespaceResp.GetNamespace()
 
 			regCreds, err := auth.GetLocalRegistryCredentials(dockerConfig)
 			if err != nil {
@@ -127,8 +137,18 @@ func getImageBuilder(regCreds auth.RegistryCredentials, dockerConfig *configfile
 			"Falling back to building remotely with buildkit")
 	}
 
-	// TODO: Create tunnelManager.
-	tunnelManager := tunnel.Manager{}
+	// TODO: Say that we're spinning up buildkit.
+	ctx, _ := context.WithTimeout(context.Background(), 3*time.Minute)
+	buildkitConn, err := manager.C.GetBuildkit(ctx, &cluster.GetBuildkitRequest{Token: authToken})
+	if err != nil {
+		return nil, errors.WithContext("boot buildkit", err)
+	}
+
+	nodeConn, err := util.Dial(buildkitConn.NodeAddress, buildkitConn.NodeCert, "")
+	if err != nil {
+		return nil, errors.WithContext("connect to node controller", err)
+	}
+	tunnelManager := tunnel.NewManager(node.NewControllerClient(nodeConn), authToken)
 	// TODO: Test building without existing namespace.
 
 	buildkitClient, err := buildkit.New(tunnelManager, regCreds)
