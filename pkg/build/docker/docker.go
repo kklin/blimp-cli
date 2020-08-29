@@ -32,7 +32,7 @@ type client struct {
 	// TODO not pointer?
 	dockerConfig *configfile.ConfigFile
 
-	composeImageCache []types.ImageSummary
+	composeImageCache map[string]types.ImageSummary
 }
 
 type CacheOptions struct {
@@ -66,13 +66,32 @@ func New(regCreds auth.RegistryCredentials, dockerConfig *configfile.ConfigFile,
 
 func (c client) BuildAndPush(serviceName, imageName string, opts build.Options) (digest string, err error) {
 	// TODO: Do the prepush here.
-	// TODO: Don't build if the docker compose cache already exists.
-	// If the image is in the docker cache, then don't build, and just retag it to imageName.
-	// Still push as normal.
+	// If the image is in the docker cache, then just tag it to be imageName
+	// rather than doing a full build.
+	cached, ok := c.composeImageCache[serviceName]
+	if ok {
+		log.WithField("service", serviceName).Info("Using cached image from Docker Compose")
+		if err := c.client.ImageTag(context.Background(), cached.ID, imageName); err != nil {
+			return "", errors.WithContext("tag", err)
+		}
+	} else {
+		if err := c.build(serviceName, imageName, opts); err != nil {
+			return "", errors.WithContext("build", err)
+		}
+	}
 
+	//imageName = "dev-kevin-blimp-registry.kelda.io/a98c0197112b7a4a96b72ea21ac0802b/web:60a7cc81c039c034c19acff5e793735889c289d9f46030ab9776d6cc6c63b977"
+	if digest, err = c.push(imageName); err != nil {
+		return "", errors.WithContext("push image", err)
+	}
+
+	return digest, nil
+}
+
+func (c *client) build(serviceName, imageName string, opts build.Options) error {
 	buildContextTar, err := makeTar(opts.Context)
 	if err != nil {
-		return "", errors.WithContext("tar context", err)
+		return errors.WithContext("tar context", err)
 	}
 
 	buildResp, err := c.client.ImageBuild(context.TODO(), buildContextTar, types.ImageBuildOptions{
@@ -87,63 +106,57 @@ func (c client) BuildAndPush(serviceName, imageName string, opts build.Options) 
 		NoCache:     opts.NoCache,
 	})
 	if err != nil {
-		return "", errors.WithContext("start build", err)
+		return errors.WithContext("start build", err)
 	}
 	defer buildResp.Body.Close()
 
 	// Block until the build completes, and return any errors that happen
 	// during the build.
-	var imageID string
-	callback := func(msg jsonmessage.JSONMessage) {
-		var id struct{ ID string }
-		if err := json.Unmarshal(*msg.Aux, &id); err != nil {
-			log.WithError(err).Warn("Failed to parse build ID")
-			return
-		}
-
-		if id.ID != "" {
-			imageID = id.ID
-		}
-	}
-
 	isTerminal := terminal.IsTerminal(int(os.Stderr.Fd()))
-	err = jsonmessage.DisplayJSONMessagesStream(buildResp.Body, os.Stderr, os.Stderr.Fd(), isTerminal, callback)
+	err = jsonmessage.DisplayJSONMessagesStream(buildResp.Body, os.Stderr, os.Stderr.Fd(), isTerminal, nil)
 	if err != nil {
-		return "", errors.NewFriendlyError(
+		return errors.NewFriendlyError(
 			"Image build for %q failed. This is likely an error with the Dockerfile, rather than Blimp.\n"+
 				"Make sure that the image successfully builds with `docker build`.\n\n"+
 				"The full error was:\n%s", serviceName, err)
 	}
-
-	if err := c.push(imageName); err != nil {
-		return "", errors.WithContext("push image", err)
-	}
-
-	// TODO: Return digest.
-	return imageID, nil
+	return nil
 }
 
-func (c *client) push(image string) error {
+func (c *client) push(image string) (string, error) {
 	cred, ok := c.regCreds.LookupByImage(image)
 	if !ok {
-		return errors.New("no credentials for pushing image")
+		return "", errors.New("no credentials for pushing image")
 	}
 
 	registryAuth, err := auth.RegistryAuthHeader(cred)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	pushResp, err := c.client.ImagePush(context.Background(), image, types.ImagePushOptions{
 		RegistryAuth: registryAuth,
 	})
 	if err != nil {
-		return errors.WithContext("start image push", err)
+		return "", errors.WithContext("start image push", err)
 	}
 	defer pushResp.Close()
 
+	var imageDigest string
+	callback := func(msg jsonmessage.JSONMessage) {
+		var digest struct{ Digest string }
+		if err := json.Unmarshal(*msg.Aux, &digest); err != nil {
+			log.WithError(err).Warn("Failed to parse digest")
+			return
+		}
+
+		if digest.Digest != "" {
+			imageDigest = digest.Digest
+		}
+	}
 	isTerminal := terminal.IsTerminal(int(os.Stderr.Fd()))
-	return jsonmessage.DisplayJSONMessagesStream(pushResp, os.Stderr, os.Stderr.Fd(), isTerminal, nil)
+	err = jsonmessage.DisplayJSONMessagesStream(pushResp, os.Stderr, os.Stderr.Fd(), isTerminal, callback)
+	return imageDigest, err
 }
 
 // getDockerClient returns a working Docker client, or nil if we can't connect
@@ -252,7 +265,7 @@ func makeTar(dir string) (io.Reader, error) {
 	return &out, err
 }
 
-func getComposeImageCache(c *docker.Client, project string) ([]types.ImageSummary, error) {
+func getComposeImageCache(c *docker.Client, project string) (map[string]types.ImageSummary, error) {
 	// See https://github.com/docker/compose/blob/854c14a5bcf566792ee8a972325c37590521656b/compose/service.py#L379
 	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
 	opts := types.ImageListOptions{
@@ -262,5 +275,20 @@ func getComposeImageCache(c *docker.Client, project string) ([]types.ImageSummar
 			Value: fmt.Sprintf("%s_*:latest", project),
 		}),
 	}
-	return c.ImageList(ctx, opts)
+	images, err := c.ImageList(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	cache := map[string]types.ImageSummary{}
+	for _, image := range images {
+		for _, tag := range image.RepoTags {
+			println(tag)
+			if !strings.HasSuffix(tag, ":latest") || !strings.HasPrefix(tag, project+"_") {
+				continue
+			}
+			cache[strings.TrimPrefix(tag, project+"_")] = image
+		}
+	}
+	return cache, nil
 }

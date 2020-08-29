@@ -151,7 +151,6 @@ func (cmd *up) run(services []string) error {
 	stClient := cmd.makeSyncthingClient(parsedCompose)
 	idPathMap := stClient.GetIDPathMap()
 
-	// TODO: Is this the right package for this func?
 	regCreds, err := auth.GetLocalRegistryCredentials(cmd.dockerConfig)
 	if err != nil {
 		log.WithError(err).Debug("Failed to get local registry credentials. Private images will fail to pull.")

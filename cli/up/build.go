@@ -34,7 +34,6 @@ func (cmd *up) buildImages(composeFile composeTypes.Project) (map[string]string,
 			return nil, errors.WithContext(fmt.Sprintf("build %s", svc.Name), err)
 		}
 
-		// TODO: Maybe this should return a fully qualified image name?
 		builtImages[svc.Name] = fmt.Sprintf("%s@%s", imageName, digest)
 	}
 
