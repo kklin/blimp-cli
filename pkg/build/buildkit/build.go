@@ -12,6 +12,7 @@ import (
 
 	"github.com/kelda/blimp/pkg/build"
 	"github.com/kelda/blimp/pkg/errors"
+	"github.com/kelda/blimp/pkg/tunnel"
 )
 
 type Client struct {
@@ -19,8 +20,19 @@ type Client struct {
 	authProvider *AuthProvider
 }
 
-func New(buildkitHost, registryHost, token string) (build.Interface, error) {
-	c, err := client.New(context.Background(), buildkitHost)
+func New(tunnelManager tunnel.Manager, registryHost, token string) (build.Interface, error) {
+	tunnelErr := make(chan error)
+	tunnelReady := make(chan struct{})
+	go func() {
+		tunnelErr <- tunnelManager.Run("127.0.0.1", 1234, "buildkitd", 1234, tunnelReady)
+	}()
+	select {
+	case err := <-tunnelErr:
+		return nil, errors.WithContext("connect to buildkitd", err)
+	case <-tunnelReady:
+	}
+
+	c, err := client.New(context.Background(), "tcp://127.0.0.1:1234")
 	if err != nil {
 		return nil, errors.WithContext("connect to buildkit", err)
 	}

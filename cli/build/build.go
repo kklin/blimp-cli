@@ -60,15 +60,27 @@ func New() *cobra.Command {
 				log.WithError(err).Fatal("Failed to load compose file")
 			}
 
+			builder, err := getBuilder()
+			if err != nil {
+				log.WithError(err).Fatal("Get image builder")
+			}
+
 			for _, svc := range parsedCompose.Services {
 				if svc.Build == nil {
 					log.Infof("%s uses an image, skipping\n", svc.Name)
 					continue
 				}
 
+				// TODO: Need to store imageNamespace. Or just always make the
+				// call to the manager createsandbox.
+				imageName := fmt.Sprintf("%s/%s", cmd.imageNamespace, svc.Name)
 				log.Infof("Building %s\n", svc.Name)
-				_, err := docker.Build(dockerClient, composePath, svc.Name,
-					*svc.Build, regCreds, dockerConfig, pull, noCache)
+				opts := build.Options{
+					BuildConfig: *svc.Build,
+					PullParent:  pull,
+					NoCache:     noCache,
+				}
+				_, err := builder.BuildAndPush(svc.Name, imageName, opts)
 				if err != nil {
 					log.WithError(err).WithField("service", svc.Name).Warn("Failed to build service")
 				}
@@ -82,4 +94,25 @@ func New() *cobra.Command {
 	cobraCmd.Flags().BoolVarP(&noCache, "no-cache", "", false,
 		"Do not use cache when building the image")
 	return cobraCmd
+}
+
+func (cmd *up) getImageBuilder() (build.Interface, error) {
+	if !cmd.forceBuildkit {
+		// TODO: Any other callers to GetDockerClient?
+		dockerClient, err := util.GetDockerClient()
+		if err == nil {
+			// TODO: docker.New could parse dockerConfig and regCreds itself.
+			return docker.New(dockerClient, cmd.regCreds, cmd.dockerConfig, cmd.auth.AuthToken, cmd.composePath), nil
+		}
+		// TODO: Handle err != nil, return it if both fail.
+	}
+
+	// TODO: Create tunnelManager.
+	// TODO: Test booting without existing namespace.
+
+	buildkitClient, err := buildkit.New(cmd.tunnelManager, strings.SplitN(cmd.imageNamespace, "/", 2)[0], cmd.auth.AuthToken)
+	if err != nil {
+		return nil, errors.WithContext("create buildkit image builder", err)
+	}
+	return buildkitClient, nil
 }
