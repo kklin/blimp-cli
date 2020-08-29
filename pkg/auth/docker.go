@@ -8,6 +8,8 @@ import (
 	"github.com/docker/cli/cli/config/configfile"
 	clitypes "github.com/docker/cli/cli/config/types"
 	"github.com/docker/docker/api/types"
+
+	"github.com/kelda/blimp/pkg/proto/cluster"
 )
 
 type RegistryCredentials map[string]types.AuthConfig
@@ -64,6 +66,17 @@ func (creds RegistryCredentials) LookupByHost(host string) (types.AuthConfig, bo
 func (creds RegistryCredentials) LookupByImage(image string) (types.AuthConfig, bool) {
 	// TODO: Special handling for index.docker.v1 for example.
 	return creds.LookupByHost(strings.SplitN(image, "/", 2)[0])
+}
+
+func (creds RegistryCredentials) ToProtobuf() map[string]*cluster.RegistryCredential {
+	pb := map[string]*cluster.RegistryCredential{}
+	for host, cred := range creds {
+		pb[host] = &cluster.RegistryCredential{
+			Username: cred.Username,
+			Password: cred.Password,
+		}
+	}
+	return pb
 }
 
 func RegistryAuthHeader(cred types.AuthConfig) (string, error) {

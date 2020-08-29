@@ -42,11 +42,12 @@ func (cmd *up) buildImages(composeFile composeTypes.Project) (map[string]string,
 
 func (cmd *up) getImageBuilder(projectName string) (build.Interface, error) {
 	if !cmd.forceBuildkit {
-		dockerClient, err := docker.New(cmd.regCreds, cmd.dockerConfig, docker.CacheOptions{ProjectName: projectName})
+		dockerClient, err := docker.New(cmd.regCreds, cmd.dockerConfig, cmd.auth.AuthToken, docker.CacheOptions{ProjectName: projectName})
 		if err == nil {
 			return dockerClient, nil
 		}
-		// TODO: Handle err != nil, return it if both fail.
+		log.WithError(err).Debug("Failed to get Docker client for local builder. " +
+			"Falling back to building remotely with buildkit")
 	}
 
 	buildkitClient, err := buildkit.New(cmd.tunnelManager, cmd.regCreds)

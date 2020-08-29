@@ -27,10 +27,10 @@ import (
 )
 
 type client struct {
-	client   *docker.Client
-	regCreds auth.RegistryCredentials
-	// TODO not pointer?
+	client       *docker.Client
+	regCreds     auth.RegistryCredentials
 	dockerConfig *configfile.ConfigFile
+	blimpToken   string
 
 	composeImageCache map[string]types.ImageSummary
 }
@@ -40,7 +40,7 @@ type CacheOptions struct {
 	ProjectName string
 }
 
-func New(regCreds auth.RegistryCredentials, dockerConfig *configfile.ConfigFile, cacheOpts CacheOptions) (build.Interface, error) {
+func New(regCreds auth.RegistryCredentials, dockerConfig *configfile.ConfigFile, blimpToken string, cacheOpts CacheOptions) (build.Interface, error) {
 	dockerClient, err := getDockerClient()
 	if err != nil {
 		return nil, err
@@ -50,6 +50,7 @@ func New(regCreds auth.RegistryCredentials, dockerConfig *configfile.ConfigFile,
 		client:       dockerClient,
 		regCreds:     regCreds,
 		dockerConfig: dockerConfig,
+		blimpToken:   blimpToken,
 	}
 
 	if !cacheOpts.Disable {
@@ -65,7 +66,11 @@ func New(regCreds auth.RegistryCredentials, dockerConfig *configfile.ConfigFile,
 }
 
 func (c client) BuildAndPush(serviceName, imageName string, opts build.Options) (digest string, err error) {
-	// TODO: Do the prepush here.
+	prePushError := make(chan error)
+	go func() {
+		prePushError <- pushBaseImage(c.client, c.blimpToken, c.regCreds, filepath.Join(opts.Context, opts.Dockerfile), replaceTag(imageName, "base"))
+	}()
+
 	// If the image is in the docker cache, then just tag it to be imageName
 	// rather than doing a full build.
 	cached, ok := c.composeImageCache[serviceName]
@@ -78,6 +83,11 @@ func (c client) BuildAndPush(serviceName, imageName string, opts build.Options) 
 		if err := c.build(serviceName, imageName, opts); err != nil {
 			return "", errors.WithContext("build", err)
 		}
+	}
+
+	// Wait for the prepush to complete.
+	if err := <-prePushError; err != nil {
+		log.WithField("service", serviceName).WithError(err).Debug("Prepush failed. Proceeding with a full image push")
 	}
 
 	//imageName = "dev-kevin-blimp-registry.kelda.io/a98c0197112b7a4a96b72ea21ac0802b/web:60a7cc81c039c034c19acff5e793735889c289d9f46030ab9776d6cc6c63b977"

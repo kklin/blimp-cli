@@ -25,6 +25,7 @@ func New() *cobra.Command {
 	var composePaths []string
 	var pull bool
 	var noCache bool
+	var forceBuildkit bool
 	cobraCmd := &cobra.Command{
 		Use:   "build [OPTIONS] [SERVICE...]",
 		Short: "Build or rebuild services.",
@@ -36,7 +37,11 @@ func New() *cobra.Command {
 			if err != nil {
 				log.WithError(err).Fatal("Failed to parse auth store")
 			}
-			// TODO: Error if not logged in.
+
+			if authConfig.AuthToken == "" {
+				fmt.Fprintln(os.Stderr, "Not logged in. Please run `blimp login`.")
+				return
+			}
 
 			dockerConfig, err := config.Load(config.Dir())
 			if err != nil {
@@ -76,8 +81,7 @@ func New() *cobra.Command {
 				log.WithError(err).Fatal("Failed to load compose file")
 			}
 
-			// TODO
-			builder, err := getImageBuilder(regCreds, dockerConfig, false)
+			builder, err := getImageBuilder(regCreds, dockerConfig, authConfig.AuthToken, forceBuildkit)
 			if err != nil {
 				log.WithError(err).Fatal("Get image builder")
 			}
@@ -108,16 +112,19 @@ func New() *cobra.Command {
 		"Always attempt to pull a newer version of the image.")
 	cobraCmd.Flags().BoolVarP(&noCache, "no-cache", "", false,
 		"Do not use cache when building the image")
+	cobraCmd.Flags().BoolVarP(&forceBuildkit, "remote-build", "", false,
+		"Force Docker images to be built in your sandbox instead of locally")
 	return cobraCmd
 }
 
-func getImageBuilder(regCreds auth.RegistryCredentials, dockerConfig *configfile.ConfigFile, forceBuildkit bool) (build.Interface, error) {
+func getImageBuilder(regCreds auth.RegistryCredentials, dockerConfig *configfile.ConfigFile, authToken string, forceBuildkit bool) (build.Interface, error) {
 	if !forceBuildkit {
-		dockerClient, err := docker.New(regCreds, dockerConfig, docker.CacheOptions{Disable: true})
+		dockerClient, err := docker.New(regCreds, dockerConfig, authToken, docker.CacheOptions{Disable: true})
 		if err == nil {
 			return dockerClient, nil
 		}
-		// TODO: Handle err != nil, return it if both fail.
+		log.WithError(err).Debug("Failed to get Docker client for local builder. " +
+			"Falling back to building remotely with buildkit")
 	}
 
 	// TODO: Create tunnelManager.

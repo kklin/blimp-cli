@@ -110,7 +110,7 @@ type up struct {
 	detach         bool
 	forceBuildkit  bool
 	dockerConfig   *configfile.ConfigFile
-	regCreds       map[string]types.AuthConfig
+	regCreds       auth.RegistryCredentials
 	imageNamespace string
 
 	nodeControllerConn   *grpc.ClientConn
@@ -302,7 +302,7 @@ func (cmd *up) createSandbox(composeCfg string, idPathMap map[string]string) err
 		&cluster.CreateSandboxRequest{
 			Token:               cmd.auth.AuthToken,
 			ComposeFile:         composeCfg,
-			RegistryCredentials: registryCredentialsToProtobuf(cmd.regCreds),
+			RegistryCredentials: cmd.regCreds.ToProtobuf(),
 			SyncedFolders:       idPathMap,
 		})
 	if err != nil {
@@ -415,15 +415,4 @@ func (cmd *up) makeSyncthingClient(dcCfg composeTypes.Project) syncthing.Client 
 	}
 
 	return syncthing.NewClient(allVolumes)
-}
-
-func registryCredentialsToProtobuf(creds map[string]types.AuthConfig) map[string]*cluster.RegistryCredential {
-	pb := map[string]*cluster.RegistryCredential{}
-	for host, cred := range creds {
-		pb[host] = &cluster.RegistryCredential{
-			Username: cred.Username,
-			Password: cred.Password,
-		}
-	}
-	return pb
 }
