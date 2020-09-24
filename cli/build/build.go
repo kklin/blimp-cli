@@ -82,7 +82,7 @@ func New() *cobra.Command {
 					log.Fatal("Docker Compose file not found.\n" +
 						"Blimp must be run from the same directory as docker-compose.yml.\n" +
 						"If you don't have a docker-compose.yml, you can use one of our examples:\n" +
-						"https://kelda.io/blimp/docs/examples/")
+						"https://blimpup.io/docs/examples/")
 				}
 				log.WithError(err).Fatal("Failed to get absolute path to Compose file")
 			}

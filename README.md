@@ -4,7 +4,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/kelda/blimp?)](https://goreportcard.com/report/github.com/kelda/blimp)
 [![Slack](https://kelda.io/img/slack-badge.svg)](http://slack.kelda.io)
 
-This repository contains the CLI for [Blimp](https://kelda.io/blimp).
+This repository contains the CLI for [Blimp](https://blimpup.io).
 Blimp lets you develop in the cloud, reducing CPU and RAM usage on your laptop.
 It supports the same
 [configuration](https://docs.docker.com/compose/compose-file) and
@@ -28,7 +28,7 @@ This repository is also used for issue tracking and feature requests.
 `blimp` has been tested on Mac, Linux, and Windows WSL.
 
 ```shell
-curl -fsSL 'https://kelda.io/get-blimp.sh' | sh
+curl -fsSL 'https://blimpup.io/get-blimp.sh' | sh
 ```
 
 Or, on Homebrew:
@@ -60,12 +60,12 @@ curl localhost:8080
 
 ## Documentation
 
-* [Design principles](https://kelda.io/blimp/docs/#/home?id=design-principles) (be
+* [Design principles](https://blimpup.io/docs/#/home?id=design-principles) (be
   light, require zero setup, and require zero workflow changes)
-* [Release notes](https://kelda.io/blimp/docs/release-notes/) for past Blimp versions.
-* [Basic usage analytics](https://kelda.io/blimp/docs/#/security?id=what-analytics-does-the-blimp-cli-collect)
-  are collected by default ([you can opt out](https://kelda.io/blimp/docs/#/security?id=what-analytics-does-the-blimp-cli-collect)).
-* [The Kelda Slack](https://slack.kelda.io) is the best way to reach the maintainers.
+* [Release notes](https://blimpup.io/docs/release-notes/) for past Blimp versions.
+* [Basic usage analytics](https://blimpup.io/docs/#/security?id=what-analytics-does-the-blimp-cli-collect)
+  are collected by default ([you can opt out](https://blimpup.io/docs/#/security?id=what-analytics-does-the-blimp-cli-collect)).
+* [The Kelda Slack](https://slack.blimpup.io) is the best way to reach the maintainers.
 
 ## Contributing
 

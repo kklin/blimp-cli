@@ -8,7 +8,7 @@ Compile with `make install`.
 
 ## Slack
 
-The [Kelda Slack](http://slack.kelda.io) is the primary mode of communication.
+The [Kelda Slack](http://slack.blimpup.io) is the primary mode of communication.
 Join the Slack to ask questions, share feedback, or anything else!
 
 ## Style
